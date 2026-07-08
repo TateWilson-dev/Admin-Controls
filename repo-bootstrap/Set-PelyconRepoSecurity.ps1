@@ -1,86 +1,110 @@
 <#
 Pelycon Repository Security Bootstrap
 Windows PowerShell Script
-
+ 
 Purpose:
 - Add/update baseline security files in a GitHub repository from a local templates folder.
 - Configure repository settings.
+- Enable GitHub-native secret scanning and push protection (the push-time prevention layer).
 - Configure branch protection.
 - Optionally create a harmless draft pull request to make the security workflow/check appear in GitHub.
-
+ 
 Important:
 - The templates folder uses visible template names:
   - CLAUDE.md
   - security.yml
   - gitleaks.toml
   - gitleaksignore
-
+ 
 The script uploads them to the repo as:
   - CLAUDE.md
   - .github/workflows/security.yml
   - .github/dependabot.yml
   - .gitleaks.toml
   - .gitleaksignore
-
+ 
 Reruns:
 - Unchanged files are skipped (content is compared, not blindly rewritten).
 - If branch protection is already active, changed files are applied through a
   pull request on the branch pelycon/baseline-update instead of a direct push,
   because direct pushes to the protected branch are blocked (by design).
-
+ 
 This avoids issues where dotfiles are hidden or missed when uploading folders/files.
-
+ 
+Secret scanning / push protection:
+- Push protection blocks a push containing a known secret BEFORE it reaches the
+  remote. It is the only true push-time prevention available on github.com cloud
+  (server-side pre-receive hooks only exist on GitHub Enterprise Server).
+- It is FREE on public repositories. On PRIVATE/INTERNAL repositories it requires
+  a GitHub Secret Protection (Advanced Security) license; without the license the
+  enablement call will fail and the script will warn (it does not abort, because
+  branch protection and the Gitleaks Action still add value).
+- Enabling secret scanning via the API requires the token's "Administration:
+  Read and write" permission (already recommended below).
+- Delegated bypass (requiring a reviewer to approve any push-protection bypass)
+  and organization-wide custom secret patterns are configured at the ORG/enterprise
+  level, not by this repo script. Set those up in the org's Advanced Security
+  security configuration. Without delegated bypass, anyone with write access can
+  bypass a block by supplying a reason.
+- Use -SkipSecretScanning to leave these settings untouched.
+ 
 Required environment variable:
 $env:GITHUB_TOKEN = "your-token"
-
+ 
 Recommended fine-grained PAT permissions:
-- Administration: Read and write
+- Administration: Read and write (also required to toggle secret scanning / push protection)
 - Contents: Read and write
 - Workflows: Read and write
 - Pull requests: Read and write, needed for -CreateTestPullRequest and for
   baseline-update pull requests on reruns after branch protection is active
 - Metadata: Read-only
 #>
-
+ 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Owner,
-
+ 
     [Parameter(Mandatory = $true)]
     [string]$Repo,
-
+ 
     [string]$Branch = "main",
-
+ 
     [int]$RequiredApprovals = 1,
-
+ 
     [string]$GitleaksCheckName = "gitleaks",
-
+ 
     [string]$TemplateDir,
-
+ 
     [switch]$DryRun,
-
+ 
     [switch]$SkipFiles,
-
+ 
     [switch]$SkipRepoSettings,
-
+ 
+    [switch]$SkipSecretScanning,
+ 
     [switch]$SkipBranchProtection,
-
+ 
     [switch]$CreateTestPullRequest
 )
-
+ 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
+ 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-
+ 
 if ([string]::IsNullOrWhiteSpace($TemplateDir)) {
     $TemplateDir = Join-Path $ScriptDir "templates"
 }
-
+ 
 $GitHubApiBase = "https://api.github.com"
 $RepoApiBase = "$GitHubApiBase/repos/$Owner/$Repo"
-
+ 
+# Tracks whether push protection ended up ON, so the summary reflects reality
+# instead of reporting a false green.
+$script:PushProtectionEnabled = $false
+ 
 $TemplateMap = @(
     @{
         TemplateNames = @("CLAUDE.md")
@@ -108,7 +132,7 @@ $TemplateMap = @(
         CommitMessage = "Add Pelycon Gitleaks ignore file"
     }
 )
-
+ 
 function Write-Step {
     param([string]$Message)
     Write-Host ""
@@ -116,80 +140,80 @@ function Write-Step {
     Write-Host $Message -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor DarkCyan
 }
-
+ 
 function Write-Ok {
     param([string]$Message)
     Write-Host "[OK] $Message" -ForegroundColor Green
 }
-
+ 
 function Write-Warn {
     param([string]$Message)
     Write-Host "[WARN] $Message" -ForegroundColor Yellow
 }
-
+ 
 function Write-DryRun {
     param([string]$Message)
     Write-Host "[DRY RUN] $Message" -ForegroundColor Yellow
 }
-
+ 
 function Get-GitHubToken {
     if ([string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
         throw "GITHUB_TOKEN is not set. Run: `$env:GITHUB_TOKEN = `"paste-token-here`""
     }
-
+ 
     return $env:GITHUB_TOKEN
 }
-
+ 
 function Invoke-GitHub {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Method,
-
+ 
         [Parameter(Mandatory = $true)]
         [string]$Uri,
-
+ 
         [object]$Body = $null,
-
+ 
         [switch]$Allow404
     )
-
+ 
     $token = Get-GitHubToken
-
+ 
     $headers = @{
         "Authorization"        = "Bearer $token"
         "Accept"               = "application/vnd.github+json"
         "X-GitHub-Api-Version" = "2022-11-28"
         "User-Agent"           = "Pelycon-Repo-Security-Bootstrap"
     }
-
+ 
     try {
         if ($null -eq $Body) {
             return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers
         }
-
+ 
         $json = $Body | ConvertTo-Json -Depth 30
         return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $headers -Body $json -ContentType "application/json"
     }
     catch {
         $statusCode = $null
-
+ 
         try {
             $statusCode = [int]$_.Exception.Response.StatusCode
         }
         catch {
             $statusCode = $null
         }
-
+ 
         if ($Allow404 -and $statusCode -eq 404) {
             return $null
         }
-
+ 
         $message = $_.Exception.Message
-
+ 
         try {
             $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
             $responseBody = $reader.ReadToEnd()
-
+ 
             if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
                 $message = "$message`n$responseBody"
             }
@@ -197,98 +221,98 @@ function Invoke-GitHub {
         catch {
             # Ignore response parsing failure.
         }
-
+ 
         throw $message
     }
 }
-
+ 
 function Test-RepositoryAccess {
     Write-Step "Checking repository access"
-
+ 
     if ($DryRun) {
         Write-DryRun ("Would check repository access for {0}/{1}." -f $Owner, $Repo)
     }
-
+ 
     $repoInfo = Invoke-GitHub -Method "GET" -Uri $RepoApiBase
     Write-Ok ("Repository found: {0}" -f $repoInfo.full_name)
-
+ 
     $defaultBranch = $repoInfo.default_branch
     Write-Host ("GitHub default branch: {0}" -f $defaultBranch)
-
+ 
     if ($Branch -ne $defaultBranch) {
         Write-Warn ("Script branch is '{0}', but GitHub default branch is '{1}'." -f $Branch, $defaultBranch)
         Write-Warn ("Use -Branch '{0}' if this repo does not use '{1}'." -f $defaultBranch, $Branch)
     }
 }
-
+ 
 function Resolve-TemplatePath {
     param([string[]]$TemplateNames)
-
+ 
     foreach ($templateName in $TemplateNames) {
         $candidate = Join-Path $TemplateDir $templateName
-
+ 
         if (Test-Path $candidate) {
             return $candidate
         }
     }
-
+ 
     return $null
 }
-
+ 
 function Test-Templates {
     if ($SkipFiles) {
         return
     }
-
+ 
     Write-Step "Checking templates folder"
-
+ 
     if (-not (Test-Path $TemplateDir)) {
         throw "Templates folder was not found: $TemplateDir"
     }
-
+ 
     foreach ($item in $TemplateMap) {
         $templatePath = Resolve-TemplatePath -TemplateNames $item.TemplateNames
-
+ 
         if ([string]::IsNullOrWhiteSpace($templatePath)) {
             $acceptableNames = $item.TemplateNames -join " or "
             throw "Missing required template for repo path '$($item.RepoPath)'. Expected: $acceptableNames in $TemplateDir"
         }
-
+ 
         Write-Ok ("Template found for {0}: {1}" -f $item.RepoPath, $templatePath)
     }
 }
-
+ 
 function Get-TemplateContentFromMapItem {
     param([hashtable]$Item)
-
+ 
     $templatePath = Resolve-TemplatePath -TemplateNames $Item.TemplateNames
-
+ 
     if ([string]::IsNullOrWhiteSpace($templatePath)) {
         $acceptableNames = $Item.TemplateNames -join " or "
         throw "Template was not found. Expected: $acceptableNames in $TemplateDir"
     }
-
+ 
     return Get-Content -Path $templatePath -Raw
 }
-
+ 
 function Get-RemoteFile {
     param(
         [string]$Path,
         [string]$TargetBranch
     )
-
+ 
     $encodedPath = [System.Uri]::EscapeDataString($Path).Replace("%2F", "/")
     $encodedRef = [System.Uri]::EscapeDataString($TargetBranch)
     $uri = "$RepoApiBase/contents/$encodedPath`?ref=$encodedRef"
-
+ 
     $result = Invoke-GitHub -Method "GET" -Uri $uri -Allow404
-
+ 
     if ($null -eq $result) {
         return $null
     }
-
+ 
     $decoded = $null
-
+ 
     try {
         $base64 = ($result.content -replace "\s", "")
         $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($base64))
@@ -296,150 +320,150 @@ function Get-RemoteFile {
     catch {
         $decoded = $null
     }
-
+ 
     return @{
         Sha     = $result.sha
         Content = $decoded
     }
 }
-
+ 
 function ConvertTo-NormalizedText {
     param([string]$Text)
-
+ 
     if ($null -eq $Text) {
         return ""
     }
-
+ 
     return ($Text -replace "`r`n", "`n").TrimEnd("`n")
 }
-
+ 
 function Test-BranchProtectionExists {
     $encodedBranch = [System.Uri]::EscapeDataString($Branch)
     $uri = "$RepoApiBase/branches/$encodedBranch/protection"
     $result = Invoke-GitHub -Method "GET" -Uri $uri -Allow404
     return ($null -ne $result)
 }
-
+ 
 function Update-GitRef {
     param(
         [string]$RefName,
         [string]$Sha
     )
-
+ 
     $body = @{
         sha   = $Sha
         force = $true
     }
-
+ 
     Invoke-GitHub -Method "PATCH" -Uri "$RepoApiBase/git/refs/$RefName" -Body $body | Out-Null
 }
-
+ 
 function Set-RepositoryFile {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path,
-
+ 
         [Parameter(Mandatory = $true)]
         [string]$Content,
-
+ 
         [Parameter(Mandatory = $true)]
         [string]$Message,
-
+ 
         [string]$TargetBranch = $Branch
     )
-
+ 
     if ($DryRun) {
         Write-DryRun ("Would create/update file on {0}: {1}" -f $TargetBranch, $Path)
         return
     }
-
+ 
     $remote = Get-RemoteFile -Path $Path -TargetBranch $TargetBranch
     $sha = if ($null -ne $remote) { $remote.Sha } else { $null }
-
+ 
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Content)
     $encodedContent = [System.Convert]::ToBase64String($bytes)
-
+ 
     $body = @{
         message = $Message
         content = $encodedContent
         branch  = $TargetBranch
     }
-
+ 
     if (-not [string]::IsNullOrWhiteSpace($sha)) {
         $body.sha = $sha
     }
-
+ 
     $encodedPath = [System.Uri]::EscapeDataString($Path).Replace("%2F", "/")
     $uri = "$RepoApiBase/contents/$encodedPath"
-
+ 
     Invoke-GitHub -Method "PUT" -Uri $uri -Body $body | Out-Null
     Write-Ok ("Created/updated {0} on {1}" -f $Path, $TargetBranch)
 }
-
+ 
 function Set-SecurityFiles {
     if ($SkipFiles) {
         Write-Warn "Skipping security file creation/update."
         return
     }
-
+ 
     Write-Step "Comparing baseline files against templates"
-
+ 
     $pending = @()
-
+ 
     foreach ($item in $TemplateMap) {
         $content = Get-TemplateContentFromMapItem -Item $item
         $remote = Get-RemoteFile -Path $item.RepoPath -TargetBranch $Branch
-
+ 
         if ($null -ne $remote -and
             (ConvertTo-NormalizedText $remote.Content) -eq (ConvertTo-NormalizedText $content)) {
             Write-Ok ("Unchanged: {0}" -f $item.RepoPath)
             continue
         }
-
+ 
         Write-Warn ("Needs create/update: {0}" -f $item.RepoPath)
         $pending += @{ Item = $item; Content = $content }
     }
-
+ 
     if ($pending.Count -eq 0) {
         Write-Ok "All baseline files already match the templates."
         return
     }
-
+ 
     $protectionActive = Test-BranchProtectionExists
-
+ 
     if (-not $protectionActive) {
         Write-Step ("Writing baseline files directly to {0} (no branch protection yet)" -f $Branch)
-
+ 
         foreach ($p in $pending) {
             Set-RepositoryFile `
                 -Path $p.Item.RepoPath `
                 -Content $p.Content `
                 -Message $p.Item.CommitMessage
         }
-
+ 
         return
     }
-
+ 
     # Branch protection blocks direct pushes to the protected branch (by
     # design), so apply template updates through a pull request instead.
     Write-Step "Branch protection is active - applying baseline updates via pull request"
-
+ 
     $updateBranch = "pelycon/baseline-update"
     $updateRef = "refs/heads/$updateBranch"
-
+ 
     if ($DryRun) {
         Write-DryRun ("Would create/reset branch {0} from {1}." -f $updateBranch, $Branch)
-
+ 
         foreach ($p in $pending) {
             Write-DryRun ("Would update {0} on {1}." -f $p.Item.RepoPath, $updateBranch)
         }
-
+ 
         Write-DryRun "Would open a pull request back into the protected branch."
         return
     }
-
+ 
     $baseSha = Get-BranchSha -BranchName $Branch
-
+ 
     if (Test-GitRefExists -RefName "heads/$updateBranch") {
         Update-GitRef -RefName "heads/$updateBranch" -Sha $baseSha
         Write-Ok ("Reset existing branch {0} to the tip of {1}." -f $updateBranch, $Branch)
@@ -448,7 +472,7 @@ function Set-SecurityFiles {
         New-GitRef -RefName $updateRef -Sha $baseSha
         Write-Ok ("Created branch: {0}" -f $updateBranch)
     }
-
+ 
     foreach ($p in $pending) {
         Set-RepositoryFile `
             -Path $p.Item.RepoPath `
@@ -456,11 +480,11 @@ function Set-SecurityFiles {
             -Message $p.Item.CommitMessage `
             -TargetBranch $updateBranch
     }
-
+ 
     $encodedHead = [System.Uri]::EscapeDataString("$Owner`:$updateBranch")
     $encodedBase = [System.Uri]::EscapeDataString($Branch)
     $openPulls = Invoke-GitHub -Method "GET" -Uri "$RepoApiBase/pulls?state=open&head=$encodedHead&base=$encodedBase"
-
+ 
     if ($null -ne $openPulls -and @($openPulls).Count -gt 0) {
         Write-Ok ("Baseline-update pull request already open: {0}" -f @($openPulls)[0].html_url)
     }
@@ -471,22 +495,22 @@ function Set-SecurityFiles {
             base  = $Branch
             body  = "Automated update of the Pelycon security baseline files from the Admin Controls templates. Review and merge to apply."
         }
-
+ 
         $pr = Invoke-GitHub -Method "POST" -Uri "$RepoApiBase/pulls" -Body $prBody
         Write-Ok ("Opened baseline-update pull request: {0}" -f $pr.html_url)
     }
-
+ 
     Write-Warn "Baseline changes are NOT live until the pull request is reviewed and merged."
 }
-
+ 
 function Set-RepositorySettings {
     if ($SkipRepoSettings) {
         Write-Warn "Skipping repository settings."
         return
     }
-
+ 
     Write-Step "Configuring repository settings"
-
+ 
     $body = @{
         allow_squash_merge          = $true
         allow_merge_commit          = $false
@@ -497,27 +521,92 @@ function Set-RepositorySettings {
         squash_merge_commit_title   = "PR_TITLE"
         squash_merge_commit_message = "PR_BODY"
     }
-
+ 
     if ($DryRun) {
         Write-DryRun "Would configure squash merge only and auto-delete branches."
         return
     }
-
+ 
     Invoke-GitHub -Method "PATCH" -Uri $RepoApiBase -Body $body | Out-Null
     Write-Ok "Repository settings configured."
 }
-
+ 
+function Enable-SecretScanningPushProtection {
+    if ($SkipSecretScanning) {
+        Write-Warn "Skipping GitHub native secret scanning / push protection."
+        $script:PushProtectionEnabled = $false
+        return
+    }
+ 
+    Write-Step "Enabling GitHub secret scanning + push protection"
+ 
+    if ($DryRun) {
+        Write-DryRun ("Would enable secret_scanning and secret_scanning_push_protection on {0}/{1}." -f $Owner, $Repo)
+        return
+    }
+ 
+    $body = @{
+        security_and_analysis = @{
+            secret_scanning                 = @{ status = "enabled" }
+            secret_scanning_push_protection = @{ status = "enabled" }
+        }
+    }
+ 
+    try {
+        Invoke-GitHub -Method "PATCH" -Uri $RepoApiBase -Body $body | Out-Null
+    }
+    catch {
+        Write-Warn "COULD NOT enable secret scanning / push protection."
+        Write-Warn "The PUSH-TIME PREVENTION layer is OFF - secrets can still reach the remote."
+        Write-Warn "Private/internal repos require a GitHub Secret Protection (Advanced Security) license;"
+        Write-Warn "public repos get it for free. Verify the repo plan/entitlement and that the token has"
+        Write-Warn "Administration: Read and write, then rerun."
+        Write-Warn ("API error: {0}" -f $_.Exception.Message)
+        $script:PushProtectionEnabled = $false
+        # Intentionally not throwing: branch protection and the Gitleaks Action still add value.
+        return
+    }
+ 
+    # Read back and confirm the settings actually took effect.
+    try {
+        $repoInfo = Invoke-GitHub -Method "GET" -Uri $RepoApiBase
+        $ss = $repoInfo.security_and_analysis.secret_scanning.status
+        $pp = $repoInfo.security_and_analysis.secret_scanning_push_protection.status
+ 
+        Write-Host ("Secret scanning status:  {0}" -f $ss)
+        Write-Host ("Push protection status:  {0}" -f $pp)
+ 
+        if ($pp -eq "enabled") {
+            Write-Ok "Push protection is ON. Pushes containing known secrets are blocked at the remote."
+            $script:PushProtectionEnabled = $true
+        }
+        else {
+            Write-Warn "Push protection did not report 'enabled' after the update."
+            Write-Warn "Check Settings -> Advanced Security, and confirm licensing for private repos."
+            $script:PushProtectionEnabled = $false
+        }
+    }
+    catch {
+        Write-Warn ("Could not read back secret scanning status: {0}" -f $_.Exception.Message)
+        $script:PushProtectionEnabled = $false
+    }
+ 
+    Write-Warn "Reminder: delegated bypass and org-wide custom patterns are ORG-level settings,"
+    Write-Warn "not configured by this script. Without delegated bypass, write-access users can"
+    Write-Warn "bypass a push-protection block by supplying a reason."
+}
+ 
 function Set-BranchProtection {
     if ($SkipBranchProtection) {
         Write-Warn "Skipping branch protection."
         return
     }
-
+ 
     Write-Step "Configuring branch protection"
-
+ 
     $encodedBranch = [System.Uri]::EscapeDataString($Branch)
     $uri = "$RepoApiBase/branches/$encodedBranch/protection"
-
+ 
     $body = @{
         required_status_checks = @{
             strict   = $true
@@ -539,71 +628,71 @@ function Set-BranchProtection {
         lock_branch = $false
         allow_fork_syncing = $true
     }
-
+ 
     if ($DryRun) {
         Write-DryRun ("Would configure branch protection for {0}." -f $Branch)
         Write-DryRun ("Would require status check: {0}" -f $GitleaksCheckName)
         Write-DryRun ("Would require approvals: {0}" -f $RequiredApprovals)
         return
     }
-
+ 
     Invoke-GitHub -Method "PUT" -Uri $uri -Body $body | Out-Null
     Write-Ok ("Branch protection configured for {0}." -f $Branch)
 }
-
+ 
 function Get-BranchSha {
     param([string]$BranchName)
-
+ 
     $encodedBranch = [System.Uri]::EscapeDataString($BranchName)
     $uri = "$RepoApiBase/git/ref/heads/$encodedBranch"
     $ref = Invoke-GitHub -Method "GET" -Uri $uri
     return $ref.object.sha
 }
-
+ 
 function Test-GitRefExists {
     param([string]$RefName)
-
+ 
     $encodedRef = [System.Uri]::EscapeDataString($RefName).Replace("%2F", "/")
     $uri = "$RepoApiBase/git/ref/$encodedRef"
     $result = Invoke-GitHub -Method "GET" -Uri $uri -Allow404
     return ($null -ne $result)
 }
-
+ 
 function New-GitRef {
     param(
         [string]$RefName,
         [string]$Sha
     )
-
+ 
     $body = @{
         ref = $RefName
         sha = $Sha
     }
-
+ 
     Invoke-GitHub -Method "POST" -Uri "$RepoApiBase/git/refs" -Body $body | Out-Null
 }
-
+ 
 function New-TestPullRequest {
     if (-not $CreateTestPullRequest) {
         return
     }
-
+ 
     Write-Step "Creating test branch and draft pull request"
-
+ 
     $testBranch = "pelycon/security-bootstrap-test"
     $testRef = "refs/heads/$testBranch"
     $testFilePath = ".pelycon/security-bootstrap-test.txt"
     $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss K")
-
+ 
     if ($DryRun) {
         Write-DryRun ("Would create/update branch: {0}" -f $testBranch)
         Write-DryRun ("Would create/update harmless test file: {0}" -f $testFilePath)
         Write-DryRun "Would open a draft pull request back into the protected branch."
         return
     }
-
+ 
     $baseSha = Get-BranchSha -BranchName $Branch
-
+ 
     if (-not (Test-GitRefExists -RefName "heads/$testBranch")) {
         New-GitRef -RefName $testRef -Sha $baseSha
         Write-Ok ("Created test branch: {0}" -f $testBranch)
@@ -611,36 +700,36 @@ function New-TestPullRequest {
     else {
         Write-Warn ("Test branch already exists: {0}" -f $testBranch)
     }
-
+ 
     $content = @"
 Pelycon security bootstrap test
-
+ 
 This harmless file was created to trigger the GitHub Actions security workflow
 and make the required Gitleaks status check visible in GitHub.
-
+ 
 Created: $timestamp
 Repository: $Owner/$Repo
 Base branch: $Branch
-
+ 
 Do not merge this pull request. Close it after confirming the security check appears.
 "@
-
+ 
     Set-RepositoryFile `
         -Path $testFilePath `
         -Content $content `
         -Message "Add Pelycon security bootstrap test file" `
         -TargetBranch $testBranch
-
+ 
     $encodedHead = [System.Uri]::EscapeDataString("$Owner`:$testBranch")
     $encodedBase = [System.Uri]::EscapeDataString($Branch)
     $existingPrsUri = "$RepoApiBase/pulls?state=open&head=$encodedHead&base=$encodedBase"
     $existingPrs = Invoke-GitHub -Method "GET" -Uri $existingPrsUri
-
+ 
     if ($existingPrs.Count -gt 0) {
         Write-Warn ("A test pull request already exists: {0}" -f $existingPrs[0].html_url)
         return
     }
-
+ 
     $prBody = @{
         title = "Pelycon security bootstrap test"
         head  = $testBranch
@@ -648,14 +737,14 @@ Do not merge this pull request. Close it after confirming the security check app
         body  = "This draft PR exists only to trigger the security workflow and confirm the required Gitleaks check appears. Do not merge it. Close it after verification."
         draft = $true
     }
-
+ 
     $pr = Invoke-GitHub -Method "POST" -Uri "$RepoApiBase/pulls" -Body $prBody
     Write-Ok ("Draft test pull request opened: {0}" -f $pr.html_url)
 }
-
+ 
 function Show-NextSteps {
     Write-Step "Next steps"
-
+ 
     if ($DryRun) {
         Write-Host "This was a dry run. No repository changes were made."
         Write-Host ""
@@ -663,7 +752,7 @@ function Show-NextSteps {
         Write-Host ("  .\Set-PelyconRepoSecurity.ps1 -Owner `"{0}`" -Repo `"{1}`" -CreateTestPullRequest" -f $Owner, $Repo)
         return
     }
-
+ 
     Write-Host "Check these areas in GitHub:"
     Write-Host ""
     Write-Host "1. Code tab:"
@@ -676,40 +765,58 @@ function Show-NextSteps {
     Write-Host "   - Confirm the 'security' workflow runs."
     Write-Host "   - Confirm the 'gitleaks' job appears."
     Write-Host ""
-    Write-Host "3. Settings -> Branches:"
+    Write-Host "3. Settings -> Advanced Security (Secret Protection):"
+    if ($script:PushProtectionEnabled) {
+        Write-Host "   - Secret scanning and push protection are ON (verified)."
+        Write-Host "   - Configure delegated bypass at the ORG level so bypasses need reviewer approval."
+    }
+    else {
+        Write-Host "   - Push protection is NOT confirmed ON. Secrets can still reach the remote."
+        Write-Host "   - Public repos: enable it (free). Private repos: needs a Secret Protection license."
+        Write-Host "   - Until it is on, the Gitleaks Action only blocks the MERGE, not the push."
+    }
+    Write-Host ""
+    Write-Host "4. Settings -> Branches:"
     Write-Host ("   - Confirm branch protection exists for {0}." -f $Branch)
     Write-Host "   - Confirm pull request review and the gitleaks check are required."
     Write-Host ""
     if ($CreateTestPullRequest) {
-        Write-Host "4. Draft test PR:"
+        Write-Host "5. Draft test PR:"
         Write-Host "   - Open the draft PR created by the script."
         Write-Host "   - Confirm the gitleaks check appears and passes."
         Write-Host "   - Confirm the PR cannot be merged without approval."
         Write-Host "   - Close the test PR when done. Do not merge it."
     }
     else {
-        Write-Host "4. To automatically create a test PR later, rerun with:"
-        Write-Host ("   .\Set-PelyconRepoSecurity.ps1 -Owner `"{0}`" -Repo `"{1}`" -SkipFiles -SkipRepoSettings -SkipBranchProtection -CreateTestPullRequest" -f $Owner, $Repo)
+        Write-Host "5. To automatically create a test PR later, rerun with:"
+        Write-Host ("   .\Set-PelyconRepoSecurity.ps1 -Owner `"{0}`" -Repo `"{1}`" -SkipFiles -SkipRepoSettings -SkipSecretScanning -SkipBranchProtection -CreateTestPullRequest" -f $Owner, $Repo)
     }
 }
-
+ 
 try {
     Write-Step "Starting Pelycon repository security bootstrap"
-
+ 
     Test-RepositoryAccess
     Test-Templates
     Set-SecurityFiles
     Set-RepositorySettings
+    Enable-SecretScanningPushProtection
     Set-BranchProtection
     New-TestPullRequest
     Show-NextSteps
-
+ 
     Write-Host ""
     if ($DryRun) {
         Write-Host "DRY RUN COMPLETE" -ForegroundColor Yellow
     }
     else {
         Write-Host "DONE" -ForegroundColor Green
+ 
+        if (-not $script:PushProtectionEnabled -and -not $SkipSecretScanning) {
+            Write-Host ""
+            Write-Warn "Push protection is not confirmed ON. This repo can still receive a secret on push;"
+            Write-Warn "the Gitleaks Action will only block the merge afterwards. Treat any pushed secret as leaked."
+        }
     }
 }
 catch {
@@ -720,6 +827,7 @@ catch {
     Write-Host "Common fixes:"
     Write-Host "  - Confirm `$env:GITHUB_TOKEN is set in this PowerShell window."
     Write-Host "  - Confirm the token has Administration, Contents, and Workflows write permissions."
+    Write-Host "  - Administration: Read and write is also required to toggle secret scanning / push protection."
     Write-Host "  - Add Pull requests write permission if using -CreateTestPullRequest."
     Write-Host "  - Confirm -Owner and -Repo match the GitHub URL."
     Write-Host "  - Confirm the branch name with -Branch, for example -Branch `"master`"."
