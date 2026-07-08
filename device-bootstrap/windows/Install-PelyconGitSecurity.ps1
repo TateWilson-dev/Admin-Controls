@@ -577,22 +577,31 @@ function Run-SelfTest {
     Push-Location $testRoot
 
     try {
-        git init | Out-Null
-        git config user.email "security-test@example.com"
-        git config user.name "Pelycon Security Test"
-
-        "hello" | Set-Content -Path "ok.txt" -Encoding UTF8
-        git add ok.txt
-
-        Write-Host ""
-        Write-Host "Self-test step 1: committing a clean file. This should succeed." -ForegroundColor Cyan
-        git commit -m "clean test"
-
+        $initOutput = & git -c init.defaultBranch=main init 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "Self-test stopped: clean commit failed. The hook may be misconfigured."
+            throw "Self-test failed: could not create a temporary Git repo."
         }
 
-$fakeGitHubToken = "ghp_" + "1234567890abcdefghij" + "ABCDEFGHIJ123456"
+        & git config user.email "security-test@example.com" 2>&1 | Out-Null
+        & git config user.name "Pelycon Security Test" 2>&1 | Out-Null
+        & git config core.autocrlf false 2>&1 | Out-Null
+
+        "hello" | Set-Content -Path "ok.txt" -Encoding UTF8
+        $addCleanOutput = & git add ok.txt 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Self-test failed: could not stage the clean test file."
+        }
+
+        $cleanCommitOutput = & git commit -m "clean test" 2>&1
+        $cleanExitCode = $LASTEXITCODE
+
+        if ($cleanExitCode -ne 0) {
+            throw "Self-test failed: clean commit was blocked. The hook may be misconfigured."
+        }
+
+        Write-Ok "Clean commit was allowed."
+
+        $fakeGitHubToken = "ghp_" + "1234567890abcdefghij" + "ABCDEFGHIJ123456"
         $fakeAzureSecret = "Ab78Q~" + "zK4mP9xQ2wL7vR3nT8sB6yD1fG5hJ0cA"
 
 @"
@@ -600,23 +609,37 @@ GITHUB_TOKEN=$fakeGitHubToken
 AZURE_CLIENT_SECRET=$fakeAzureSecret
 "@ | Set-Content -Path "secret-test.txt" -Encoding UTF8
 
-        git add secret-test.txt
-
-        Write-Host ""
-        Write-Host "Self-test step 2: committing fake secrets. This should be blocked by Gitleaks." -ForegroundColor Cyan
-        git commit -m "secret test should be blocked"
-
-        $exitCode = $LASTEXITCODE
-
-        if ($exitCode -eq 0) {
-            throw "Self-test failed: the fake secret commit was not blocked."
+        $addSecretOutput = & git add secret-test.txt 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Self-test failed: could not stage the fake secret test file."
         }
 
+        $secretCommitOutput = & git commit -m "secret test should be blocked" 2>&1
+        $secretExitCode = $LASTEXITCODE
+        $secretCommitText = $secretCommitOutput -join "`n"
+
+        if ($secretExitCode -eq 0) {
+            throw "Self-test failed: fake secret commit was allowed. Gitleaks is not blocking commits."
+        }
+
+        if (
+            ($secretCommitText -notmatch "COMMIT BLOCKED") -and
+            ($secretCommitText -notmatch "leaks found") -and
+            ($secretCommitText -notmatch "Gitleaks found")
+        ) {
+            throw "Self-test failed: fake secret commit failed, but not clearly because of Gitleaks."
+        }
+
+        Write-Ok "Fake secret commit was blocked."
+
         Write-Host ""
-        Write-Host "Self-test result:" -ForegroundColor Yellow
-        Write-Host "The second commit was blocked because fake secrets were detected." -ForegroundColor Yellow
-        Write-Host "That is the expected result for the self-test." -ForegroundColor Yellow
-        Write-Host "For real work, the user should remove the listed secret and commit again." -ForegroundColor Yellow
+        Write-Host "SELF-TEST PASSED" -ForegroundColor Green
+        Write-Host "Device Git secret scanning is working." -ForegroundColor Green
+        Write-Host ""
+        Write-Host "Next steps:"
+        Write-Host "  1. Close and reopen PowerShell, Git Bash, and Claude Code."
+        Write-Host "  2. Use Git normally."
+        Write-Host "  3. If a commit is blocked, remove the secret and commit again."
         Write-Host ""
         Write-Host "Test repo location:"
         Write-Host "  $testRoot"
@@ -700,7 +723,7 @@ try {
     Write-Host "  Close and reopen PowerShell, Git Bash, and Claude Code so they reload PATH."
     Write-Host ""
     Write-Host "Optional test command:"
-    Write-Host "  .\Install-PelyconGitSecurity.ps1 -RunSelfTest"
+    Write-Host '  Set-ExecutionPolicy -Scope Process Bypass -Force; Invoke-WebRequest "https://raw.githubusercontent.com/TateWilson-dev/Admin-Controls/main/device-bootstrap/windows/Install-PelyconGitSecurity.ps1" -OutFile "$env:TEMP\Install-PelyconGitSecurity.ps1"; & "$env:TEMP\Install-PelyconGitSecurity.ps1" -RunSelfTest'
 }
 catch {
     Write-Host ""
