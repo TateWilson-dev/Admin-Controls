@@ -12,7 +12,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 .\Install-PelyconGitSecurity.ps1
 
 Optional self-test:
-.\Install-PelyconGitSecurity.ps1 -RunSelfTest
+Set-ExecutionPolicy -Scope Process Bypass -Force; Invoke-WebRequest "https://raw.githubusercontent.com/TateWilson-dev/Admin-Controls/main/device-bootstrap/windows/Install-PelyconGitSecurity.ps1" -OutFile "$env:TEMP\Install-PelyconGitSecurity.ps1"; & "$env:TEMP\Install-PelyconGitSecurity.ps1" -RunSelfTest
 
 Force Gitleaks update:
 .\Install-PelyconGitSecurity.ps1 -ForceUpdate
