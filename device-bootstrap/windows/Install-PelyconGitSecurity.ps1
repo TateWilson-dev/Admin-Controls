@@ -591,7 +591,11 @@ function Run-SelfTest {
             throw "Self-test failed: could not stage the clean test file."
         }
 
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $cleanCommitOutput = & git commit -m "clean test" 2>&1
+        $cleanExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorActionPreference
         $cleanExitCode = $LASTEXITCODE
 
         if ($cleanExitCode -ne 0) {
@@ -608,12 +612,27 @@ GITHUB_TOKEN=$fakeGitHubToken
 AZURE_CLIENT_SECRET=$fakeAzureSecret
 "@ | Set-Content -Path "secret-test.txt" -Encoding UTF8
 
-        $addSecretOutput = & git add secret-test.txt 2>&1
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $cleanCommitOutput = & git commit -m "clean test" 2>&1
+        $cleanExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorActionPreference
+
+if ($cleanExitCode -ne 0) {
+    throw "Self-test failed: clean commit was blocked. The hook may be misconfigured."
+}
+
+Write-Ok "Clean commit was allowed."
         if ($LASTEXITCODE -ne 0) {
             throw "Self-test failed: could not stage the fake secret test file."
         }
 
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $secretCommitOutput = & git commit -m "secret test should be blocked" 2>&1
+        $secretExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorActionPreference
+
         $secretExitCode = $LASTEXITCODE
         $secretCommitText = $secretCommitOutput -join "`n"
 
