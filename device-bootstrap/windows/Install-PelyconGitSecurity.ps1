@@ -576,26 +576,19 @@ function Run-SelfTest {
     Push-Location $testRoot
 
     try {
-        $initOutput = & git -c init.defaultBranch=main init 2>&1
+        & git -c init.defaultBranch=main init *> $null
         if ($LASTEXITCODE -ne 0) {
             throw "Self-test failed: could not create a temporary Git repo."
         }
 
-        & git config user.email "security-test@example.com" 2>&1 | Out-Null
-        & git config user.name "Pelycon Security Test" 2>&1 | Out-Null
-        & git config core.autocrlf false 2>&1 | Out-Null
+        & git config user.email "security-test@example.com" *> $null
+        & git config user.name "Pelycon Security Test" *> $null
+        & git config core.autocrlf false *> $null
 
         "hello" | Set-Content -Path "ok.txt" -Encoding UTF8
-        $addCleanOutput = & git add ok.txt 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "Self-test failed: could not stage the clean test file."
-        }
+        & git add ok.txt *> $null
 
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
         $cleanCommitOutput = & git commit -m "clean test" 2>&1
-        $cleanExitCode = $LASTEXITCODE
-        $ErrorActionPreference = $previousErrorActionPreference
         $cleanExitCode = $LASTEXITCODE
 
         if ($cleanExitCode -ne 0) {
@@ -612,27 +605,9 @@ GITHUB_TOKEN=$fakeGitHubToken
 AZURE_CLIENT_SECRET=$fakeAzureSecret
 "@ | Set-Content -Path "secret-test.txt" -Encoding UTF8
 
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        $cleanCommitOutput = & git commit -m "clean test" 2>&1
-        $cleanExitCode = $LASTEXITCODE
-        $ErrorActionPreference = $previousErrorActionPreference
+        & git add secret-test.txt *> $null
 
-if ($cleanExitCode -ne 0) {
-    throw "Self-test failed: clean commit was blocked. The hook may be misconfigured."
-}
-
-Write-Ok "Clean commit was allowed."
-        if ($LASTEXITCODE -ne 0) {
-            throw "Self-test failed: could not stage the fake secret test file."
-        }
-
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
         $secretCommitOutput = & git commit -m "secret test should be blocked" 2>&1
-        $secretExitCode = $LASTEXITCODE
-        $ErrorActionPreference = $previousErrorActionPreference
-
         $secretExitCode = $LASTEXITCODE
         $secretCommitText = $secretCommitOutput -join "`n"
 
