@@ -8,20 +8,19 @@ Purpose:
 - Redact secret values by default so Claude Code does not see the secret in terminal output.
 
 Normal install:
-Set-ExecutionPolicy -Scope Process Bypass -Force
-.\Install-PelyconGitSecurity.ps1
+Set-ExecutionPolicy -Scope Process Bypass -Force; Invoke-WebRequest "https://raw.githubusercontent.com/TateWilson-dev/Admin-Controls/main/device-bootstrap/windows/Install-PelyconGitSecurity.ps1" -OutFile "$env:TEMP\Install-PelyconGitSecurity.ps1"; & "$env:TEMP\Install-PelyconGitSecurity.ps1"
 
 Optional self-test:
 Set-ExecutionPolicy -Scope Process Bypass -Force; Invoke-WebRequest "https://raw.githubusercontent.com/TateWilson-dev/Admin-Controls/main/device-bootstrap/windows/Install-PelyconGitSecurity.ps1" -OutFile "$env:TEMP\Install-PelyconGitSecurity.ps1"; & "$env:TEMP\Install-PelyconGitSecurity.ps1" -RunSelfTest
 
 Force Gitleaks update:
-.\Install-PelyconGitSecurity.ps1 -ForceUpdate
+Set-ExecutionPolicy -Scope Process Bypass -Force; Invoke-WebRequest "https://raw.githubusercontent.com/TateWilson-dev/Admin-Controls/main/device-bootstrap/windows/Install-PelyconGitSecurity.ps1" -OutFile "$env:TEMP\Install-PelyconGitSecurity.ps1"; & "$env:TEMP\Install-PelyconGitSecurity.ps1" -ForceUpdate
 
 Uninstall hook/Gitleaks setup:
-.\Install-PelyconGitSecurity.ps1 -Uninstall
+Set-ExecutionPolicy -Scope Process Bypass -Force; Invoke-WebRequest "https://raw.githubusercontent.com/TateWilson-dev/Admin-Controls/main/device-bootstrap/windows/Install-PelyconGitSecurity.ps1" -OutFile "$env:TEMP\Install-PelyconGitSecurity.ps1"; & "$env:TEMP\Install-PelyconGitSecurity.ps1" -Uninstall
 
 Sandbox/admin-only mode that may show actual secret values:
-.\Install-PelyconGitSecurity.ps1 -ShowSecretsInReports
+Set-ExecutionPolicy -Scope Process Bypass -Force; Invoke-WebRequest "https://raw.githubusercontent.com/TateWilson-dev/Admin-Controls/main/device-bootstrap/windows/Install-PelyconGitSecurity.ps1" -OutFile "$env:TEMP\Install-PelyconGitSecurity.ps1"; & "$env:TEMP\Install-PelyconGitSecurity.ps1" -ShowSecretsInReports
 #>
 
 [CmdletBinding()]
