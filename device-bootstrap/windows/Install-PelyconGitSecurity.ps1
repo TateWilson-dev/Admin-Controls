@@ -579,25 +579,35 @@ function Run-SelfTest {
             [string[]]$Arguments
         )
 
+        $gitPath = (Get-Command "git.exe" -ErrorAction Stop).Source
         $stdoutPath = Join-Path $testRoot ("stdout-" + [guid]::NewGuid().ToString() + ".txt")
         $stderrPath = Join-Path $testRoot ("stderr-" + [guid]::NewGuid().ToString() + ".txt")
 
-        & git @Arguments 1> $stdoutPath 2> $stderrPath
-        $exitCode = $LASTEXITCODE
+        $process = Start-Process `
+            -FilePath $gitPath `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $testRoot `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
 
         $output = ""
+
         if (Test-Path $stdoutPath) {
-            $output += (Get-Content -Path $stdoutPath -Raw -ErrorAction SilentlyContinue)
+            $output += Get-Content -Path $stdoutPath -Raw -ErrorAction SilentlyContinue
         }
+
         if (Test-Path $stderrPath) {
             $output += "`n"
-            $output += (Get-Content -Path $stderrPath -Raw -ErrorAction SilentlyContinue)
+            $output += Get-Content -Path $stderrPath -Raw -ErrorAction SilentlyContinue
         }
 
         Remove-Item -Path $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
         return [pscustomobject]@{
-            ExitCode = $exitCode
+            ExitCode = $process.ExitCode
             Output   = $output
         }
     }
@@ -615,7 +625,7 @@ function Run-SelfTest {
             throw "Self-test failed: could not configure test Git email."
         }
 
-        $result = Invoke-GitQuiet @("config", "user.name", "Pelycon Security Test")
+        $result = Invoke-GitQuiet @("config", "user.name", "Pelycon-Security-Test")
         if ($result.ExitCode -ne 0) {
             throw "Self-test failed: could not configure test Git username."
         }
@@ -632,7 +642,7 @@ function Run-SelfTest {
             throw "Self-test failed: could not stage the clean test file."
         }
 
-        $result = Invoke-GitQuiet @("commit", "-m", "clean test")
+        $result = Invoke-GitQuiet @("commit", "-m", "clean-test")
         if ($result.ExitCode -ne 0) {
             throw "Self-test failed: clean commit was blocked. The hook may be misconfigured."
         }
@@ -652,7 +662,7 @@ AZURE_CLIENT_SECRET=$fakeAzureSecret
             throw "Self-test failed: could not stage the fake secret test file."
         }
 
-        $result = Invoke-GitQuiet @("commit", "-m", "secret test should be blocked")
+        $result = Invoke-GitQuiet @("commit", "-m", "secret-test-should-be-blocked")
         $secretCommitText = $result.Output
 
         if ($result.ExitCode -eq 0) {
