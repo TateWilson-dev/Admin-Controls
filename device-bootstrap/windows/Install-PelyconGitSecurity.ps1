@@ -625,9 +625,6 @@ try {
     Write-Host ""
     Write-Host "Recommended next step:"
     Write-Host "  Close and reopen PowerShell, Git Bash, and Claude Code so they reload PATH."
-    Write-Host ""
-    Write-Host "Optional test command:"
-    Write-Host "  .\Install-PelyconGitSecurity.ps1 -RunSelfTest"
 }
 catch {
     Write-Host ""
