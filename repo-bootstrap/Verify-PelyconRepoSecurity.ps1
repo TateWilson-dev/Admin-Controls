@@ -96,12 +96,15 @@ if (-not $repoRes.Ok) {
     exit 1
 }
  
-$repo = $repoRes.Data
-$visibility = $repo.visibility
+# NOTE: do NOT name this $repo - PowerShell variables are case-insensitive, so
+# $repo would overwrite the [string]$Repo parameter (coercing this object to a
+# string) and silently break every check below plus the final URL.
+$repoInfo = $repoRes.Data
+$visibility = $repoInfo.visibility
 Write-Info ("visibility = {0}; archived = {1}; disabled = {2}; fork = {3}" -f `
-    $visibility, $repo.archived, $repo.disabled, $repo.fork)
+    $visibility, $repoInfo.archived, $repoInfo.disabled, $repoInfo.fork)
  
-if ($repo.archived -or $repo.disabled) {
+if ($repoInfo.archived -or $repoInfo.disabled) {
     Write-Warn "Repo is archived/disabled - secret scanning will not run regardless of the toggles."
 }
 if ($visibility -ne "public") {
@@ -115,13 +118,26 @@ if ($visibility -ne "public") {
 # ------------------------------------------------------------------
 Write-Step "Secret scanning settings (configuration)"
  
-$saa = $repo.security_and_analysis
 function Get-Status { param($node) if ($null -ne $node -and $null -ne $node.status) { return $node.status } else { return "absent" } }
  
-$ssStatus = Get-Status $saa.secret_scanning
-$ppStatus = Get-Status $saa.secret_scanning_push_protection
-$npStatus = Get-Status $saa.secret_scanning_non_provider_patterns
-$vcStatus = Get-Status $saa.secret_scanning_validity_checks
+$saa = $repoInfo.security_and_analysis
+ 
+if ($null -eq $saa) {
+    # GitHub omits security_and_analysis unless the token can read secret-scanning
+    # settings. Null here means "cannot see it", NOT "disabled".
+    Write-Warn "security_and_analysis is not readable with this token - reporting these as UNKNOWN."
+    Write-Warn "This does NOT mean the settings are off. It means the token lacks the permission to"
+    Write-Warn "read secret-scanning settings (fine-grained: Administration:Read + Secret scanning"
+    Write-Warn "alerts:Read; classic: repo + security_events). The authoritative read is:"
+    Write-Warn "  gh api /repos/$Owner/$Repo --jq '.security_and_analysis'   (with an admin token)"
+    $ssStatus = "unknown"; $ppStatus = "unknown"; $npStatus = "unknown"; $vcStatus = "unknown"
+}
+else {
+    $ssStatus = Get-Status $saa.secret_scanning
+    $ppStatus = Get-Status $saa.secret_scanning_push_protection
+    $npStatus = Get-Status $saa.secret_scanning_non_provider_patterns
+    $vcStatus = Get-Status $saa.secret_scanning_validity_checks
+}
  
 Write-Info ("secret_scanning                       = {0}" -f $ssStatus)
 Write-Info ("secret_scanning_push_protection       = {0}" -f $ppStatus)
@@ -129,9 +145,11 @@ Write-Info ("secret_scanning_non_provider_patterns = {0}  (optional)" -f $npStat
 Write-Info ("secret_scanning_validity_checks       = {0}  (optional)" -f $vcStatus)
  
 if ($ssStatus -eq "enabled") { Write-Pass "secret_scanning is enabled." }
+elseif ($ssStatus -eq "unknown") { Write-Warn "secret_scanning: UNKNOWN (token cannot read it)." }
 else { Write-Fail "secret_scanning is NOT enabled." }
  
 if ($ppStatus -eq "enabled") { Write-Pass "secret_scanning_push_protection is enabled." }
+elseif ($ppStatus -eq "unknown") { Write-Warn "secret_scanning_push_protection: UNKNOWN (token cannot read it)." }
 else { Write-Fail "secret_scanning_push_protection is NOT enabled." }
  
 # ------------------------------------------------------------------
