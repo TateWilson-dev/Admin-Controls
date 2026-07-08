@@ -573,25 +573,67 @@ function Run-SelfTest {
     $testRoot = Join-Path $env:TEMP ("pelycon-gitleaks-selftest-" + [guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 
+    function Invoke-GitQuiet {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string[]]$Arguments
+        )
+
+        $stdoutPath = Join-Path $testRoot ("stdout-" + [guid]::NewGuid().ToString() + ".txt")
+        $stderrPath = Join-Path $testRoot ("stderr-" + [guid]::NewGuid().ToString() + ".txt")
+
+        & git @Arguments 1> $stdoutPath 2> $stderrPath
+        $exitCode = $LASTEXITCODE
+
+        $output = ""
+        if (Test-Path $stdoutPath) {
+            $output += (Get-Content -Path $stdoutPath -Raw -ErrorAction SilentlyContinue)
+        }
+        if (Test-Path $stderrPath) {
+            $output += "`n"
+            $output += (Get-Content -Path $stderrPath -Raw -ErrorAction SilentlyContinue)
+        }
+
+        Remove-Item -Path $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            Output   = $output
+        }
+    }
+
     Push-Location $testRoot
 
     try {
-        & git -c init.defaultBranch=main init *> $null
-        if ($LASTEXITCODE -ne 0) {
+        $result = Invoke-GitQuiet @("-c", "init.defaultBranch=main", "init")
+        if ($result.ExitCode -ne 0) {
             throw "Self-test failed: could not create a temporary Git repo."
         }
 
-        & git config user.email "security-test@example.com" *> $null
-        & git config user.name "Pelycon Security Test" *> $null
-        & git config core.autocrlf false *> $null
+        $result = Invoke-GitQuiet @("config", "user.email", "security-test@example.com")
+        if ($result.ExitCode -ne 0) {
+            throw "Self-test failed: could not configure test Git email."
+        }
+
+        $result = Invoke-GitQuiet @("config", "user.name", "Pelycon Security Test")
+        if ($result.ExitCode -ne 0) {
+            throw "Self-test failed: could not configure test Git username."
+        }
+
+        $result = Invoke-GitQuiet @("config", "core.autocrlf", "false")
+        if ($result.ExitCode -ne 0) {
+            throw "Self-test failed: could not configure test Git line endings."
+        }
 
         "hello" | Set-Content -Path "ok.txt" -Encoding UTF8
-        & git add ok.txt *> $null
 
-        $cleanCommitOutput = & git commit -m "clean test" 2>&1
-        $cleanExitCode = $LASTEXITCODE
+        $result = Invoke-GitQuiet @("add", "ok.txt")
+        if ($result.ExitCode -ne 0) {
+            throw "Self-test failed: could not stage the clean test file."
+        }
 
-        if ($cleanExitCode -ne 0) {
+        $result = Invoke-GitQuiet @("commit", "-m", "clean test")
+        if ($result.ExitCode -ne 0) {
             throw "Self-test failed: clean commit was blocked. The hook may be misconfigured."
         }
 
@@ -605,13 +647,15 @@ GITHUB_TOKEN=$fakeGitHubToken
 AZURE_CLIENT_SECRET=$fakeAzureSecret
 "@ | Set-Content -Path "secret-test.txt" -Encoding UTF8
 
-        & git add secret-test.txt *> $null
+        $result = Invoke-GitQuiet @("add", "secret-test.txt")
+        if ($result.ExitCode -ne 0) {
+            throw "Self-test failed: could not stage the fake secret test file."
+        }
 
-        $secretCommitOutput = & git commit -m "secret test should be blocked" 2>&1
-        $secretExitCode = $LASTEXITCODE
-        $secretCommitText = $secretCommitOutput -join "`n"
+        $result = Invoke-GitQuiet @("commit", "-m", "secret test should be blocked")
+        $secretCommitText = $result.Output
 
-        if ($secretExitCode -eq 0) {
+        if ($result.ExitCode -eq 0) {
             throw "Self-test failed: fake secret commit was allowed. Gitleaks is not blocking commits."
         }
 
